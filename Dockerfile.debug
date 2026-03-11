@@ -1,0 +1,24 @@
+FROM golang:1.26-alpine
+
+# Set build context for Delve
+ENV CGO_ENABLED=0
+WORKDIR /app
+
+# Install Delve
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+
+# Copy dependencies first for caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+# Build the main package with debug flags
+RUN go build -o spoxy -gcflags="all=-N -l" main.go
+
+# Expose API port and Debugger port
+EXPOSE 8080 40000
+
+# Start Delve as the entrypoint
+CMD ["/go/bin/dlv", "--listen=:40000", "--headless=true", "--api-version=2", "--accept-multiclient", "--continue", "exec", "./spoxy"]
