@@ -34,17 +34,34 @@ func NewClient(proxyURLStr string, rdb *redis.Client) *Client {
 		}
 	}
 
-	deviceID := generateDeviceID()
-
-	return &Client{
+	c := &Client{
 		http: &http.Client{
 			Timeout:   10 * time.Second,
 			Transport: transport,
 		},
-		redis:    rdb,
-		ctx:      context.Background(),
-		deviceID: deviceID,
+		redis: rdb,
+		ctx:   context.Background(),
 	}
+
+	c.initDeviceID()
+
+	return c
+}
+
+func (c *Client) initDeviceID() {
+	if c.redis != nil {
+		if val, err := c.redis.Get(c.ctx, "spoxy:device_id").Result(); err == nil && val != "" {
+			c.deviceID = val
+			logrus.WithField("device_id", c.deviceID).Debug("Using persistent device_id from Redis")
+			return
+		}
+	}
+
+	c.deviceID = generateDeviceID()
+	if c.redis != nil {
+		c.redis.Set(c.ctx, "spoxy:device_id", c.deviceID, 0)
+	}
+	logrus.WithField("device_id", c.deviceID).Debug("Generated and persisted new device_id")
 }
 
 func generateDeviceID() string {
@@ -190,6 +207,21 @@ func (c *Client) ensureClientToken() error {
 		return nil
 	}
 
+	// Try fetching from Redis cache first
+	if c.redis != nil {
+		if val, err := c.redis.Get(c.ctx, "spoxy:client_token").Result(); err == nil && val != "" {
+			if exp, err := c.redis.Get(c.ctx, "spoxy:client_token_exp").Result(); err == nil && exp != "" {
+				expTime, err := time.Parse(time.RFC3339, exp)
+				if err == nil && time.Now().Before(expTime) {
+					c.clientToken = val
+					c.clientTokenExp = expTime
+					logrus.Debug("Using cached Spotify client token")
+					return nil
+				}
+			}
+		}
+	}
+
 	config, err := c.getDynamicConfig()
 	if err != nil {
 		// If we can't get dynamic config, use hardcoded fallback values
@@ -221,8 +253,8 @@ func (c *Client) ensureClientToken() error {
 		},
 	}
 
-	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://clienttoken.spotify.com/v1/clienttoken", bytes.NewReader(body))
+	jsonBody, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", "https://clienttoken.spotify.com/v1/clienttoken", bytes.NewReader(jsonBody))
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
@@ -258,6 +290,12 @@ func (c *Client) ensureClientToken() error {
 
 	c.clientToken = data.GrantedToken.Token
 	c.clientTokenExp = time.Now().Add(time.Duration(data.GrantedToken.ExpiryAfterSeconds) * time.Second)
+
+	if c.redis != nil {
+		// Cache client token and its expiration
+		c.redis.Set(c.ctx, "spoxy:client_token", c.clientToken, 0)
+		c.redis.Set(c.ctx, "spoxy:client_token_exp", c.clientTokenExp.Format(time.RFC3339), 0)
+	}
 
 	return nil
 }
@@ -337,13 +375,16 @@ func (c *Client) ensureToken() error {
 
 	// Try fetching from Redis cache first
 	if c.redis != nil {
-		ctx := context.Background()
-		if val, err := c.redis.Get(ctx, "spoxy:access_token").Result(); err == nil && val != "" {
-			c.token = val
-			// Assume it's valid if in cache, as we set TTL below. Setting arbitrary future expiry in struct.
-			c.expiryTime = time.Now().Add(5 * time.Minute)
-			logrus.Debug("Using cached Spotify access token")
-			return nil
+		if val, err := c.redis.Get(c.ctx, "spoxy:access_token").Result(); err == nil && val != "" {
+			if exp, err := c.redis.Get(c.ctx, "spoxy:access_token_exp").Result(); err == nil && exp != "" {
+				expTime, err := time.Parse(time.RFC3339, exp)
+				if err == nil && time.Now().Before(expTime) {
+					c.token = val
+					c.expiryTime = expTime
+					logrus.Debug("Using cached Spotify access token")
+					return nil
+				}
+			}
 		}
 	}
 
@@ -420,9 +461,9 @@ func (c *Client) ensureToken() error {
 	c.expiryTime = time.UnixMilli(data.ExpiryMs)
 
 	if c.redis != nil {
-		ctx := context.Background()
-		// Cache for 55 minutes to be safe (Spotify tokens usually last 1 hour)
-		c.redis.Set(ctx, "spoxy:access_token", c.token, 55*time.Minute)
+		// Cache access token and its expiration
+		c.redis.Set(c.ctx, "spoxy:access_token", c.token, 0)
+		c.redis.Set(c.ctx, "spoxy:access_token_exp", c.expiryTime.Format(time.RFC3339), 0)
 	}
 
 	logrus.Info("Successfully obtained new Spotify access token and cached it")
@@ -439,6 +480,10 @@ func parseLink(link string) (string, string, error) {
 }
 
 func (c *Client) get(urlStr string, v interface{}) error {
+	return c.getInternal(urlStr, v, true)
+}
+
+func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) error {
 	if err := c.ensureToken(); err != nil {
 		return err
 	}
@@ -468,8 +513,12 @@ func (c *Client) get(urlStr string, v interface{}) error {
 		"url":        urlStr,
 		"has_at":     c.token != "",
 		"has_ct":     c.clientToken != "",
-		"ct_first_8": c.clientToken[:8],
-		"at_first_8": c.token[:8],
+		"at_first_8": func() string {
+			if len(c.token) > 8 {
+				return c.token[:8]
+			}
+			return ""
+		}(),
 	}).Debug("Making Spotify API request")
 
 	resp, err := c.http.Do(req)
@@ -477,6 +526,16 @@ func (c *Client) get(urlStr string, v interface{}) error {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized && retryOn401 {
+		logrus.Warn("Spotify API returned 401 Unauthorized, clearing tokens and retrying...")
+		c.token = ""
+		c.clientToken = ""
+		if c.redis != nil {
+			c.redis.Del(c.ctx, "spoxy:access_token", "spoxy:access_token_exp", "spoxy:client_token", "spoxy:client_token_exp")
+		}
+		return c.getInternal(urlStr, v, false)
+	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
