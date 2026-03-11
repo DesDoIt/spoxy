@@ -7,9 +7,9 @@ services:
       dockerfile: Dockerfile.debug
     ports:
       - "8080:8080"
-      - "40000:40000"
+      - "4000:4000"
     environment:
-      - SPOXY_REDIS_URL=redis://redis:6379/0
+      - SPOXY_REDIS_URL=redis://redis:6379/0`
       - SPOXY_PROXY_URL=${SPOXY_PROXY_URL:-}
     depends_on:
       - redis

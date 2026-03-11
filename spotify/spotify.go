@@ -57,6 +57,7 @@ var (
 	jsUrlRegex             = regexp.MustCompile(`src="([^"]+web-player[^"]+\.js)"`)
 	totpSecretRegex        = regexp.MustCompile(`\{secret:['"]([^'"]+)['"],version:(\d+)\}`)
 	getTrackHashRegex      = regexp.MustCompile(`"getTrack",\s*"query",\s*"([a-f0-9]{64})"`)
+	getAlbumHashRegex      = regexp.MustCompile(`"getAlbum",\s*"query",\s*"([a-f0-9]{64})"`)
 	fetchPlaylistHashRegex = regexp.MustCompile(`"fetchPlaylist",\s*"query",\s*"([a-f0-9]{64})"`)
 	clientIDRegex          = regexp.MustCompile(`clientId:"([a-f0-9]{32})"`)
 	clientVersionRegex     = regexp.MustCompile(`client_version:"([^"]+)"`)
@@ -135,6 +136,13 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 		newConfig.GetTrackHash = trackHashMatches[1]
 	} else {
 		return nil, fmt.Errorf("could not find getTrack hash in JS bundle")
+	}
+
+	albumHashMatches := getAlbumHashRegex.FindStringSubmatch(jsContent)
+	if len(albumHashMatches) >= 2 {
+		newConfig.GetAlbumHash = albumHashMatches[1]
+	} else {
+		return nil, fmt.Errorf("could not find getAlbum hash in JS bundle")
 	}
 
 	playlistHashMatches := fetchPlaylistHashRegex.FindStringSubmatch(jsContent)
@@ -480,9 +488,6 @@ func (c *Client) get(urlStr string, v interface{}) error {
 
 	// Log first 1000 chars of body for debugging
 	bodyStr := string(bodyBytes)
-	fmt.Println("---RAW_JSON_START---")
-	fmt.Println(bodyStr)
-	fmt.Println("---RAW_JSON_END---")
 	if len(bodyStr) > 1000 {
 		bodyStr = bodyStr[:1000] + "..."
 	}
@@ -531,8 +536,23 @@ func (c *Client) Track(id string) (*Track, error) {
 	}
 
 	// Build artists
-	artistObjs := make([]SimplifiedArtist, 0, len(track.Artists.Items))
-	for _, item := range track.Artists.Items {
+	artistObjs := make([]SimplifiedArtist, 0)
+
+	// Add FirstArtist
+	for _, item := range track.FirstArtist.Items {
+		artistID := strings.TrimPrefix(item.URI, "spotify:artist:")
+		artistObjs = append(artistObjs, SimplifiedArtist{
+			ExternalURLs: ExternalURLs{Spotify: "https://open.spotify.com/artist/" + artistID},
+			Href:         "https://api.spotify.com/v1/artists/" + artistID,
+			ID:           artistID,
+			Name:         item.Profile.Name,
+			Type:         "artist",
+			URI:          item.URI,
+		})
+	}
+
+	// Add OtherArtists
+	for _, item := range track.OtherArtists.Items {
 		artistID := strings.TrimPrefix(item.URI, "spotify:artist:")
 		artistObjs = append(artistObjs, SimplifiedArtist{
 			ExternalURLs: ExternalURLs{Spotify: "https://open.spotify.com/artist/" + artistID},
@@ -563,6 +583,15 @@ func (c *Client) Track(id string) (*Track, error) {
 			URI:          a.URI,
 		})
 	}
+
+	dateStr := ""
+	if album.Date.IsoString != "" {
+		// Example: "2010-01-01T00:00:00Z" -> "2010-01-01"
+		if len(album.Date.IsoString) >= 10 {
+			dateStr = album.Date.IsoString[:10]
+		}
+	}
+
 	albumObj := SimplifiedAlbum{
 		AlbumType:    "album",
 		Artists:      albumArtists,
@@ -571,6 +600,7 @@ func (c *Client) Track(id string) (*Track, error) {
 		ID:           albumID,
 		Images:       albumImages,
 		Name:         album.Name,
+		ReleaseDate:  dateStr,
 		Type:         "album",
 		URI:          album.URI,
 	}
@@ -587,6 +617,43 @@ func (c *Client) Track(id string) (*Track, error) {
 		Type:         "track",
 		URI:          "spotify:track:" + id,
 	}, nil
+}
+
+func (c *Client) Album(id string) ([]Track, error) {
+	config, err := c.getDynamicConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
+	}
+
+	var data AlbumResponse
+	variables := fmt.Sprintf(`{"uri":"spotify:album:%s","locale":"","offset":0,"limit":50}`, id)
+	hash := config.GetAlbumHash
+
+	if err := c.graphqlRequest("getAlbum", variables, hash, &data); err != nil {
+		return nil, err
+	}
+
+	album := data.Data.AlbumUnion
+	if album.Typename == "NotFound" {
+		return nil, fmt.Errorf("album not found: %s", id)
+	}
+
+	var tracks []Track
+	for _, item := range album.TracksV2.Items {
+		trackID := strings.TrimPrefix(item.Track.URI, "spotify:track:")
+		t, err := c.Track(trackID)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"album_id": id,
+				"track_id": trackID,
+				"err":      err,
+			}).Warn("Failed to fetch track details for album")
+			continue
+		}
+		tracks = append(tracks, *t)
+	}
+
+	return tracks, nil
 }
 
 func (c *Client) Playlist(id string) ([]Track, error) {
@@ -711,7 +778,8 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 	}
 
 	var tracks []Track
-	if kind == "track" {
+	switch kind {
+	case "track":
 		t, err := c.Track(id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
@@ -722,7 +790,18 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 		} else {
 			tracks = []Track{*t}
 		}
-	} else {
+	case "album":
+		albumTracks, err := c.Album(id)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				tracks = []Track{}
+			} else {
+				return nil, err
+			}
+		} else {
+			tracks = albumTracks
+		}
+	case "playlist":
 		playlistTracks, err := c.Playlist(id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
@@ -733,6 +812,8 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 		} else {
 			tracks = playlistTracks
 		}
+	default:
+		return nil, fmt.Errorf("unsupported link type: %s", kind)
 	}
 
 	if c.redis != nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/DesDoIt/spoxy/spotify"
 	"github.com/redis/go-redis/v9"
@@ -44,7 +45,12 @@ func main() {
 				"link":  link,
 				"error": err,
 			}).Error("Error resolving link")
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+			status := http.StatusInternalServerError
+			if err.Error() == "invalid spotify link" || strings.HasPrefix(err.Error(), "unsupported link type") {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 

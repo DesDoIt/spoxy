@@ -14,11 +14,8 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the main package with debug flags
-RUN go build -o spoxy -gcflags="all=-N -l" main.go
-
 # Expose API port and Debugger port
-EXPOSE 8080 40000
+EXPOSE 8080 4000
 
 # Start Delve as the entrypoint
-CMD ["/go/bin/dlv", "--listen=:40000", "--headless=true", "--api-version=2", "--accept-multiclient", "--continue", "exec", "./spoxy"]
+CMD [ "/go/bin/dlv", "--listen=:4000", "--headless=true", "--log=true", "--accept-multiclient", "--api-version=2", "debug", "--continue", "--output=spoxy"]

@@ -13,6 +13,7 @@ type DynamicConfig struct {
 	TOTPSecret        string
 	TOTPVersion       int
 	GetTrackHash      string
+	GetAlbumHash      string
 	FetchPlaylistHash string
 	ClientID          string
 	ClientVersion     string
@@ -93,8 +94,11 @@ type TrackResponse struct {
 			URI          string `json:"uri"`
 			Name         string `json:"name"`
 			AlbumOfTrack struct {
-				URI      string `json:"uri"`
-				Name     string `json:"name"`
+				URI  string `json:"uri"`
+				Name string `json:"name"`
+				Date struct {
+					IsoString string `json:"isoString"`
+				} `json:"date"`
 				CoverArt struct {
 					Sources []struct {
 						URL    string `json:"url"`
@@ -111,14 +115,22 @@ type TrackResponse struct {
 					} `json:"items"`
 				} `json:"artists"`
 			} `json:"albumOfTrack"`
-			Artists struct {
+			FirstArtist struct {
 				Items []struct {
 					URI     string `json:"uri"`
 					Profile struct {
 						Name string `json:"name"`
 					} `json:"profile"`
 				} `json:"items"`
-			} `json:"artists"`
+			} `json:"firstArtist"`
+			OtherArtists struct {
+				Items []struct {
+					URI     string `json:"uri"`
+					Profile struct {
+						Name string `json:"name"`
+					} `json:"profile"`
+				} `json:"items"`
+			} `json:"otherArtists"`
 			Duration struct {
 				TotalMilliseconds int `json:"totalMilliseconds"`
 			} `json:"duration"`
@@ -126,6 +138,24 @@ type TrackResponse struct {
 				Playable bool `json:"playable"`
 			} `json:"playability"`
 		} `json:"trackUnion"`
+	} `json:"data"`
+}
+
+type AlbumResponse struct {
+	Data struct {
+		AlbumUnion struct {
+			Typename string `json:"__typename"`
+			URI      string `json:"uri"`
+			Name     string `json:"name"`
+			TracksV2 struct {
+				Items []struct {
+					Track struct {
+						URI  string `json:"uri"`
+						Name string `json:"name"`
+					} `json:"track"`
+				} `json:"items"`
+			} `json:"tracksV2"`
+		} `json:"albumUnion"`
 	} `json:"data"`
 }
 
