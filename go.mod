@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/sirupsen/logrus v1.9.4
+	golang.org/x/time v0.15.0
 )
 
 require (

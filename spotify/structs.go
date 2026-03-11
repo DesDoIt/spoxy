@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/time/rate"
 )
 
 type DynamicConfig struct {
@@ -33,6 +34,7 @@ type Client struct {
 
 	configMu sync.Mutex
 	config   *DynamicConfig
+	limiter  *rate.Limiter
 }
 
 type ExternalURLs struct {

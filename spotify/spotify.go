@@ -19,6 +19,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/time/rate"
 )
 
 var linkRegex = regexp.MustCompile(`open\.spotify\.com\/(track|playlist|album|artist)\/([a-zA-Z0-9]+)`)
@@ -39,8 +40,9 @@ func NewClient(proxyURLStr string, rdb *redis.Client) *Client {
 			Timeout:   10 * time.Second,
 			Transport: transport,
 		},
-		redis: rdb,
-		ctx:   context.Background(),
+		redis:   rdb,
+		ctx:     context.Background(),
+		limiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 10), // 5 req/sec, burst 10
 	}
 
 	c.initDeviceID()
@@ -484,93 +486,129 @@ func (c *Client) get(urlStr string, v interface{}) error {
 }
 
 func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) error {
-	if err := c.ensureToken(); err != nil {
-		return err
-	}
+	var lastErr error
+	maxRetries := 3
+	backoff := 1 * time.Second
 
-	req, _ := http.NewRequest("GET", urlStr, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Referer", "https://open.spotify.com/")
-	req.Header.Set("Origin", "https://open.spotify.com")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("app-platform", "WebPlayer")
-	appVersion := "1.2.58.261.g16b088e2"
-	if cfg, err := c.getDynamicConfig(); err == nil && cfg.ClientVersion != "" {
-		appVersion = cfg.ClientVersion
-	}
-	req.Header.Set("spotify-app-version", appVersion)
-
-	// Consistent device_id/sp_t from client instance
-	req.Header.Set("Cookie", fmt.Sprintf("sp_t=%s", c.deviceID))
-
-	if c.clientToken != "" {
-		req.Header.Set("client-token", c.clientToken)
-		req.Header.Set("X-Client-Token", c.clientToken)
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"url":        urlStr,
-		"has_at":     c.token != "",
-		"has_ct":     c.clientToken != "",
-		"at_first_8": func() string {
-			if len(c.token) > 8 {
-				return c.token[:8]
-			}
-			return ""
-		}(),
-	}).Debug("Making Spotify API request")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized && retryOn401 {
-		logrus.Warn("Spotify API returned 401 Unauthorized, clearing tokens and retrying...")
-		c.token = ""
-		c.clientToken = ""
-		if c.redis != nil {
-			c.redis.Del(c.ctx, "spoxy:access_token", "spoxy:access_token_exp", "spoxy:client_token", "spoxy:client_token_exp")
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			logrus.WithFields(logrus.Fields{
+				"attempt": i,
+				"error":   lastErr,
+				"backoff": backoff,
+			}).Warn("Retrying Spotify API request after delay")
+			time.Sleep(backoff)
+			backoff *= 2
 		}
-		return c.getInternal(urlStr, v, false)
-	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
-	}
+		// Wait for rate limiter
+		if err := c.limiter.Wait(c.ctx); err != nil {
+			return fmt.Errorf("rate limiter error: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
+		if err := c.ensureToken(); err != nil {
+			return err
+		}
+
+		req, _ := http.NewRequest("GET", urlStr, nil)
+		// ... (headers)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Referer", "https://open.spotify.com/")
+		req.Header.Set("Origin", "https://open.spotify.com")
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		req.Header.Set("app-platform", "WebPlayer")
+		appVersion := "1.2.58.261.g16b088e2"
+		if cfg, err := c.getDynamicConfig(); err == nil && cfg.ClientVersion != "" {
+			appVersion = cfg.ClientVersion
+		}
+		req.Header.Set("spotify-app-version", appVersion)
+		req.Header.Set("Cookie", fmt.Sprintf("sp_t=%s", c.deviceID))
+		if c.clientToken != "" {
+			req.Header.Set("client-token", c.clientToken)
+			req.Header.Set("X-Client-Token", c.clientToken)
+		}
+
 		logrus.WithFields(logrus.Fields{
-			"url":    urlStr,
-			"status": resp.Status,
-			"body":   string(bodyBytes),
-		}).Error("Spotify API returned non-200 status")
+			"url":        urlStr,
+			"has_at":     c.token != "",
+			"has_ct":     c.clientToken != "",
+			"at_first_8": func() string {
+				if len(c.token) > 8 {
+					return c.token[:8]
+				}
+				return ""
+			}(),
+			"attempt": i,
+		}).Debug("Making Spotify API request")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return fmt.Errorf("spotify api error: 429 Too Many Requests (rate limited)")
+			retryAfter := resp.Header.Get("Retry-After")
+			if retryAfter != "" {
+				if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil {
+					logrus.WithField("seconds", retryAfter).Info("Honoring Retry-After header")
+					time.Sleep(seconds)
+				}
+			}
+			lastErr = fmt.Errorf("429 Too Many Requests")
+			continue
 		}
-		return fmt.Errorf("spotify api error: %s", resp.Status)
+
+		if resp.StatusCode == http.StatusUnauthorized && retryOn401 {
+			logrus.Warn("Spotify API returned 401 Unauthorized, clearing tokens and retrying...")
+			c.token = ""
+			c.clientToken = ""
+			if c.redis != nil {
+				c.redis.Del(c.ctx, "spoxy:access_token", "spoxy:access_token_exp", "spoxy:client_token", "spoxy:client_token_exp")
+			}
+			// One-time retry for 401, don't increment i
+			i--
+			retryOn401 = false
+			continue
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("spotify api error: %s", resp.Status)
+			logrus.WithFields(logrus.Fields{
+				"url":    urlStr,
+				"status": resp.Status,
+				"body":   string(bodyBytes),
+			}).Error("Spotify API returned non-200 status")
+
+			if resp.StatusCode == http.StatusInternalServerError || resp.StatusCode == http.StatusBadGateway {
+				continue // Retry on server errors
+			}
+			return lastErr // Don't retry on other client errors
+		}
+
+		// Log first 1000 chars of body for debugging
+		bodyStr := string(bodyBytes)
+		if len(bodyStr) > 1000 {
+			bodyStr = bodyStr[:1000] + "..."
+		}
+		logrus.WithField("body", bodyStr).Debug("Raw Spotify API response")
+
+		if err := json.Unmarshal(bodyBytes, v); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
+		return nil
 	}
 
-	// Log first 1000 chars of body for debugging
-	bodyStr := string(bodyBytes)
-	if len(bodyStr) > 1000 {
-		bodyStr = bodyStr[:1000] + "..."
-	}
-	logrus.WithField("body", bodyStr).Debug("Raw Spotify API response")
-
-	if err := json.Unmarshal(bodyBytes, v); err != nil {
-		logrus.WithFields(logrus.Fields{
-			"url": urlStr,
-			"err": err,
-		}).Error("Failed to decode Spotify API response")
-		return fmt.Errorf("failed to decode response from %s: %w", urlStr, err)
-	}
-
-	return nil
+	return fmt.Errorf("request failed after %d retries: %w", maxRetries, lastErr)
 }
 
 func (c *Client) graphqlRequest(operationName, variables, sha256Hash string, v interface{}) error {
