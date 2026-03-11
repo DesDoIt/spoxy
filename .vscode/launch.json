@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "SPOXY Docker Debug",
+            "type": "go",
+            "request": "attach",
+            "port": 4000,
+            "host": "127.0.0.1",
+            "cwd": "${workspaceRoot}",
+            "showLog": true,
+            "mode": "remote",
+            "remotePath": "/app/spoxy/",
+            "substitutePath": [
+                { "from": "${workspaceFolder}", "to": "/app/spoxy" },
+            ]
+        }, {
+          "name": "SPOXY Local Debug",
+          "type":"go",
+          "request": "launch",
+          "mode": "debug",
+          "envFile": "${workspaceFolder}/app.env",
+          "program": "${workspaceFolder}/main.go",
+          "output": "${workspaceFolder}/spoxy",
+          "args": []
+        }
+    ]
+}
