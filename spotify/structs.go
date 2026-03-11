@@ -14,6 +14,7 @@ type DynamicConfig struct {
 	TOTPVersion       int
 	GetTrackHash      string
 	GetAlbumHash      string
+	GetArtistHash     string
 	FetchPlaylistHash string
 	ClientID          string
 	ClientVersion     string
@@ -138,6 +139,28 @@ type TrackResponse struct {
 				Playable bool `json:"playable"`
 			} `json:"playability"`
 		} `json:"trackUnion"`
+	} `json:"data"`
+}
+
+type ArtistResponse struct {
+	Data struct {
+		ArtistUnion struct {
+			Typename string `json:"__typename"`
+			URI      string `json:"uri"`
+			Profile    struct {
+				Name string `json:"name"`
+			} `json:"profile"`
+			Discography struct {
+				TopTracks struct {
+					Items []struct {
+						Track struct {
+							ID  string `json:"id"`
+							URI string `json:"uri"`
+						} `json:"track"`
+					} `json:"items"`
+				} `json:"topTracks"`
+			} `json:"discography"`
+		} `json:"artistUnion"`
 	} `json:"data"`
 }
 

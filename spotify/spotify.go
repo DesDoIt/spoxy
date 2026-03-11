@@ -21,7 +21,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var linkRegex = regexp.MustCompile(`open\.spotify\.com\/(track|playlist|album)\/([a-zA-Z0-9]+)`)
+var linkRegex = regexp.MustCompile(`open\.spotify\.com\/(track|playlist|album|artist)\/([a-zA-Z0-9]+)`)
 
 func NewClient(proxyURLStr string, rdb *redis.Client) *Client {
 	transport := &http.Transport{}
@@ -58,6 +58,7 @@ var (
 	totpSecretRegex        = regexp.MustCompile(`\{secret:['"]([^'"]+)['"],version:(\d+)\}`)
 	getTrackHashRegex      = regexp.MustCompile(`"getTrack",\s*"query",\s*"([a-f0-9]{64})"`)
 	getAlbumHashRegex      = regexp.MustCompile(`"getAlbum",\s*"query",\s*"([a-f0-9]{64})"`)
+	getArtistHashRegex     = regexp.MustCompile(`"queryArtistOverview",\s*"query",\s*"([a-f0-9]{64})"`)
 	fetchPlaylistHashRegex = regexp.MustCompile(`"fetchPlaylist",\s*"query",\s*"([a-f0-9]{64})"`)
 	clientIDRegex          = regexp.MustCompile(`clientId:"([a-f0-9]{32})"`)
 	clientVersionRegex     = regexp.MustCompile(`client_version:"([^"]+)"`)
@@ -145,6 +146,13 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 		return nil, fmt.Errorf("could not find getAlbum hash in JS bundle")
 	}
 
+	artistHashMatches := getArtistHashRegex.FindStringSubmatch(jsContent)
+	if len(artistHashMatches) >= 2 {
+		newConfig.GetArtistHash = artistHashMatches[1]
+	} else {
+		return nil, fmt.Errorf("could not find getArtist hash in JS bundle")
+	}
+
 	playlistHashMatches := fetchPlaylistHashRegex.FindStringSubmatch(jsContent)
 	if len(playlistHashMatches) >= 2 {
 		newConfig.FetchPlaylistHash = playlistHashMatches[1]
@@ -167,6 +175,8 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 	logrus.WithFields(logrus.Fields{
 		"totp_version":  newConfig.TOTPVersion,
 		"track_hash":    newConfig.GetTrackHash[:8] + "...",
+		"album_hash":    newConfig.GetAlbumHash[:8] + "...",
+		"artist_hash":   newConfig.GetArtistHash[:8] + "...",
 		"playlist_hash": newConfig.FetchPlaylistHash[:8] + "...",
 		"client_id":     newConfig.ClientID[:8] + "...",
 	}).Info("Successfully extracted dynamic configuration")
@@ -619,6 +629,46 @@ func (c *Client) Track(id string) (*Track, error) {
 	}, nil
 }
 
+func (c *Client) Artist(id string) ([]Track, error) {
+	config, err := c.getDynamicConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
+	}
+
+	var data ArtistResponse
+	variables := fmt.Sprintf(`{"uri":"spotify:artist:%s","locale":"","includePrerelease":false}`, id)
+	hash := config.GetArtistHash
+
+	if err := c.graphqlRequest("queryArtistOverview", variables, hash, &data); err != nil {
+		return nil, err
+	}
+
+	artist := data.Data.ArtistUnion
+	if artist.Typename == "NotFound" {
+		return nil, fmt.Errorf("artist not found: %s", id)
+	}
+
+	var tracks []Track
+	for _, item := range artist.Discography.TopTracks.Items {
+		trackID := item.Track.ID
+		if trackID == "" {
+			trackID = strings.TrimPrefix(item.Track.URI, "spotify:track:")
+		}
+		t, err := c.Track(trackID)
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"artist_id": id,
+				"track_id":  trackID,
+				"err":       err,
+			}).Warn("Failed to fetch track details for artist")
+			continue
+		}
+		tracks = append(tracks, *t)
+	}
+
+	return tracks, nil
+}
+
 func (c *Client) Album(id string) ([]Track, error) {
 	config, err := c.getDynamicConfig()
 	if err != nil {
@@ -800,6 +850,17 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 			}
 		} else {
 			tracks = albumTracks
+		}
+	case "artist":
+		artistTracks, err := c.Artist(id)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				tracks = []Track{}
+			} else {
+				return nil, err
+			}
+		} else {
+			tracks = artistTracks
 		}
 	case "playlist":
 		playlistTracks, err := c.Playlist(id)
