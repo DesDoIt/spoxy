@@ -89,6 +89,12 @@ type Track struct {
 	URI          string             `json:"uri"`
 }
 
+type ResolutionResponse struct {
+	LinkType       string  `json:"link_type"`
+	LinkEntityName string  `json:"link_entity_name"`
+	Tracks         []Track `json:"tracks"`
+}
+
 type TrackResponse struct {
 	Data struct {
 		TrackUnion struct {
@@ -187,6 +193,7 @@ type AlbumResponse struct {
 type PlaylistResponse struct {
 	Data struct {
 		PlaylistV2 struct {
+			Name    string `json:"name"`
 			Content struct {
 				Items []struct {
 					ItemV2 struct {

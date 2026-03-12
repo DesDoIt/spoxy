@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/DesDoIt/spoxy/spotify"
 	"github.com/redis/go-redis/v9"
@@ -39,7 +38,7 @@ func main() {
 		}
 
 		log.WithField("link", link).Info("Resolving track metadata")
-		tracks, err := client.Resolve(link)
+		res, err := client.Resolve(link)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"link":  link,
@@ -47,15 +46,22 @@ func main() {
 			}).Error("Error resolving link")
 
 			status := http.StatusInternalServerError
-			if err.Error() == "invalid spotify link" || strings.HasPrefix(err.Error(), "unsupported link type") {
+			if err.Error() == spotify.ERROR_UNSUPPORTED {
 				status = http.StatusBadRequest
+			} else if err.Error() == spotify.ERROR_NO_TRACK_FOUND {
+				status = http.StatusNotFound
 			}
+
 			http.Error(w, err.Error(), status)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(tracks); err != nil {
+		if len(res.Tracks) == 0 {
+			http.Error(w, spotify.ERROR_NO_TRACK_FOUND, http.StatusNotFound)
+			return
+		}
+
+		if err := json.NewEncoder(w).Encode(res); err != nil {
 			log.WithError(err).Error("Error encoding response")
 		}
 	})

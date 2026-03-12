@@ -476,7 +476,7 @@ func (c *Client) ensureToken() error {
 func parseLink(link string) (string, string, error) {
 	m := linkRegex.FindStringSubmatch(link)
 	if len(m) != 3 {
-		return "", "", fmt.Errorf("invalid spotify link")
+		return "", "", fmt.Errorf(ERROR_UNSUPPORTED)
 	}
 	return m[1], m[2], nil
 }
@@ -530,9 +530,9 @@ func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) erro
 		}
 
 		logrus.WithFields(logrus.Fields{
-			"url":        urlStr,
-			"has_at":     c.token != "",
-			"has_ct":     c.clientToken != "",
+			"url":    urlStr,
+			"has_at": c.token != "",
+			"has_ct": c.clientToken != "",
 			"at_first_8": func() string {
 				if len(c.token) > 8 {
 					return c.token[:8]
@@ -726,10 +726,10 @@ func (c *Client) Track(id string) (*Track, error) {
 	}, nil
 }
 
-func (c *Client) Artist(id string) ([]Track, error) {
+func (c *Client) Artist(id string) ([]Track, string, error) {
 	config, err := c.getDynamicConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
+		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
 
 	var data ArtistResponse
@@ -737,12 +737,12 @@ func (c *Client) Artist(id string) ([]Track, error) {
 	hash := config.GetArtistHash
 
 	if err := c.graphqlRequest("queryArtistOverview", variables, hash, &data); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	artist := data.Data.ArtistUnion
 	if artist.Typename == "NotFound" {
-		return nil, fmt.Errorf("artist not found: %s", id)
+		return nil, "", fmt.Errorf("artist not found: %s", id)
 	}
 
 	var tracks []Track
@@ -763,13 +763,13 @@ func (c *Client) Artist(id string) ([]Track, error) {
 		tracks = append(tracks, *t)
 	}
 
-	return tracks, nil
+	return tracks, artist.Profile.Name, nil
 }
 
-func (c *Client) Album(id string) ([]Track, error) {
+func (c *Client) Album(id string) ([]Track, string, error) {
 	config, err := c.getDynamicConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
+		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
 
 	var data AlbumResponse
@@ -777,12 +777,12 @@ func (c *Client) Album(id string) ([]Track, error) {
 	hash := config.GetAlbumHash
 
 	if err := c.graphqlRequest("getAlbum", variables, hash, &data); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	album := data.Data.AlbumUnion
 	if album.Typename == "NotFound" {
-		return nil, fmt.Errorf("album not found: %s", id)
+		return nil, "", fmt.Errorf("album not found: %s", id)
 	}
 
 	var tracks []Track
@@ -800,17 +800,18 @@ func (c *Client) Album(id string) ([]Track, error) {
 		tracks = append(tracks, *t)
 	}
 
-	return tracks, nil
+	return tracks, album.Name, nil
 }
 
-func (c *Client) Playlist(id string) ([]Track, error) {
+func (c *Client) Playlist(id string) ([]Track, string, error) {
 	var tracks []Track
+	var playlistName string
 	offset := 0
 	limit := 100
 
 	config, err := c.getDynamicConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
+		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
 
 	for {
@@ -820,7 +821,11 @@ func (c *Client) Playlist(id string) ([]Track, error) {
 		hash := config.FetchPlaylistHash
 
 		if err := c.graphqlRequest("fetchPlaylist", variables, hash, &data); err != nil {
-			return nil, err
+			return nil, "", err
+		}
+
+		if playlistName == "" {
+			playlistName = data.Data.PlaylistV2.Name
 		}
 
 		items := data.Data.PlaylistV2.Content.Items
@@ -903,10 +908,10 @@ func (c *Client) Playlist(id string) ([]Track, error) {
 		}
 	}
 
-	return tracks, nil
+	return tracks, playlistName, nil
 }
 
-func (c *Client) Resolve(link string) ([]Track, error) {
+func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
 	kind, id, err := parseLink(link)
 	if err != nil {
 		return nil, err
@@ -917,14 +922,19 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 
 	if c.redis != nil {
 		if val, err := c.redis.Get(ctx, cacheKey).Result(); err == nil {
-			var cachedTracks []Track
-			if err := json.Unmarshal([]byte(val), &cachedTracks); err == nil {
-				return cachedTracks, nil
+			var cached ResolutionResponse
+			if err := json.Unmarshal([]byte(val), &cached); err == nil {
+				return &cached, nil
 			}
 		}
 	}
 
+	res := &ResolutionResponse{
+		LinkType: kind,
+	}
+
 	var tracks []Track
+	var name string
 	switch kind {
 	case "track":
 		t, err := c.Track(id)
@@ -936,9 +946,10 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 			}
 		} else {
 			tracks = []Track{*t}
+			name = t.Name
 		}
 	case "album":
-		albumTracks, err := c.Album(id)
+		albumTracks, albumName, err := c.Album(id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -947,9 +958,10 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 			}
 		} else {
 			tracks = albumTracks
+			name = albumName
 		}
 	case "artist":
-		artistTracks, err := c.Artist(id)
+		artistTracks, artistName, err := c.Artist(id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -958,9 +970,10 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 			}
 		} else {
 			tracks = artistTracks
+			name = artistName
 		}
 	case "playlist":
-		playlistTracks, err := c.Playlist(id)
+		playlistTracks, playlistName, err := c.Playlist(id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -969,16 +982,24 @@ func (c *Client) Resolve(link string) ([]Track, error) {
 			}
 		} else {
 			tracks = playlistTracks
+			name = playlistName
 		}
 	default:
-		return nil, fmt.Errorf("unsupported link type: %s", kind)
+		return nil, fmt.Errorf(ERROR_UNSUPPORTED)
 	}
 
+	res.Tracks = tracks
+	res.LinkEntityName = name
+
 	if c.redis != nil {
-		if data, err := json.Marshal(tracks); err == nil {
+		if data, err := json.Marshal(res); err == nil {
 			c.redis.Set(ctx, cacheKey, data, 24*time.Hour)
 		}
 	}
 
-	return tracks, nil
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf(ERROR_NO_TRACK_FOUND)
+	}
+
+	return res, nil
 }

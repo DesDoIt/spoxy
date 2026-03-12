@@ -78,7 +78,8 @@ Resolves a Spotify link into its metadata.
 ### Error Codes
 
 -   `200 OK`: Success.
--   `400 Bad Request`: Invalid Spotify link or unsupported type.
+-   `404 Not Found`: No tracks found for the given link.
+-   `400 Bad Request`: Unsupported link type.
 -   `500 Internal Server Error`: Unexpected error resolving metadata.
 
 ## Development & Debugging
