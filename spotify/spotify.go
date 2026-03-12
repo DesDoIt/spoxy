@@ -638,7 +638,7 @@ func (c *Client) Track(id string) (*Track, error) {
 	}
 
 	track := data.Data.TrackUnion
-	if track.Typename == "NotFound" {
+	if track.Typename != "Track" {
 		return nil, fmt.Errorf("track not found: %s", id)
 	}
 
@@ -741,7 +741,7 @@ func (c *Client) Artist(id string) ([]Track, string, error) {
 	}
 
 	artist := data.Data.ArtistUnion
-	if artist.Typename == "NotFound" {
+	if artist.Typename != "Artist" {
 		return nil, "", fmt.Errorf("artist not found: %s", id)
 	}
 
@@ -781,7 +781,7 @@ func (c *Client) Album(id string) ([]Track, string, error) {
 	}
 
 	album := data.Data.AlbumUnion
-	if album.Typename == "NotFound" {
+	if album.Typename != "Album" {
 		return nil, "", fmt.Errorf("album not found: %s", id)
 	}
 
@@ -822,6 +822,10 @@ func (c *Client) Playlist(id string) ([]Track, string, error) {
 
 		if err := c.graphqlRequest("fetchPlaylist", variables, hash, &data); err != nil {
 			return nil, "", err
+		}
+
+		if data.Data.PlaylistV2.Typename != "Playlist" {
+			return nil, "", fmt.Errorf("playlist not found: %s", id)
 		}
 
 		if playlistName == "" {

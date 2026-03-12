@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   app:
+    restart: always
     build: .
     ports:
       - "${PORT}:8080"
@@ -11,4 +12,5 @@ services:
       - redis
 
   redis:
+    restart: always
     image: redis:alpine

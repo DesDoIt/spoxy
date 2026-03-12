@@ -52,15 +52,20 @@ func main() {
 				status = http.StatusNotFound
 			}
 
-			http.Error(w, err.Error(), status)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 
 		if len(res.Tracks) == 0 {
-			http.Error(w, spotify.ERROR_NO_TRACK_FOUND, http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": spotify.ERROR_NO_TRACK_FOUND})
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(res); err != nil {
 			log.WithError(err).Error("Error encoding response")
 		}

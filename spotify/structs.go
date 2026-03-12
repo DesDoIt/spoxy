@@ -193,7 +193,8 @@ type AlbumResponse struct {
 type PlaylistResponse struct {
 	Data struct {
 		PlaylistV2 struct {
-			Name    string `json:"name"`
+			Typename string `json:"__typename"`
+			Name     string `json:"name"`
 			Content struct {
 				Items []struct {
 					ItemV2 struct {
