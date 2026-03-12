@@ -55,24 +55,28 @@ Resolves a Spotify link into its metadata.
     ```
 -   **Sample Response**:
     ```json
-    [
-      {
-        "album": {
-          "name": "Abramyan: Preludes...",
-          "release_date": "2010-01-01",
-          "images": [...]
-        },
-        "artists": [
-          {
-            "name": "Eduard Abramyan",
-            "id": "5EuJ3aXZp3JKHsk7g32Vbd"
-          }
-        ],
-        "name": "Prelude for Piano No. 11 in F-Sharp Minor",
-        "duration_ms": 248293,
-        "id": "4iV5W9uYEdYUVa79Axb7Rh"
-      }
-    ]
+    {
+      "link_type": "track | album | playlist | artist",
+      "link_entity_name": "name of the entity linked to",
+      "tracks"[
+        {
+          "album": {
+            "name": "Abramyan: Preludes...",
+            "release_date": "2010-01-01",
+            "images": [...]
+          },
+          "artists": [
+            {
+              "name": "Eduard Abramyan",
+              "id": "5EuJ3aXZp3JKHsk7g32Vbd"
+            }
+          ],
+          "name": "Prelude for Piano No. 11 in F-Sharp Minor",
+          "duration_ms": 248293,
+          "id": "4iV5W9uYEdYUVa79Axb7Rh"
+        }
+      ]
+    }
     ```
 
 ### Error Codes
