@@ -1,9 +1,12 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/DesDoIt/spoxy/spotify"
 	"github.com/redis/go-redis/v9"
@@ -77,7 +80,33 @@ func main() {
 	}
 
 	log.WithField("port", port).Info("Starting server")
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	handler := gzipMiddleware(http.DefaultServeMux)
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.WithError(err).Fatal("Server failed to start")
 	}
+}
+
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (w gzipResponseWriter) Write(b []byte) (int, error) {
+	return w.Writer.Write(b)
+}
+
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+
+		next.ServeHTTP(gzipResponseWriter{Writer: gz, ResponseWriter: w}, r)
+	})
 }
