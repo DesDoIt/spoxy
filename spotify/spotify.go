@@ -83,7 +83,7 @@ var (
 	clientVersionRegex     = regexp.MustCompile(`client_version:"([^"]+)"`)
 )
 
-func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
+func (c *Client) getDynamicConfig(ctx context.Context) (*DynamicConfig, error) {
 	c.configMu.Lock()
 	defer c.configMu.Unlock()
 
@@ -95,7 +95,7 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 	logrus.Info("Fetching new dynamic configuration from Spotify web player")
 
 	// 1. Fetch HTML
-	req, _ := http.NewRequest("GET", "https://open.spotify.com/", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://open.spotify.com/", nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -124,7 +124,7 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 	logrus.WithField("js_url", jsUrl).Debug("Found web-player script")
 
 	// 3. Fetch JS bundle
-	reqJS, _ := http.NewRequest("GET", jsUrl, nil)
+	reqJS, _ := http.NewRequestWithContext(ctx, "GET", jsUrl, nil)
 	reqJS.Header.Set("User-Agent", "Mozilla/5.0")
 	respJS, err := c.http.Do(reqJS)
 	if err != nil {
@@ -204,15 +204,15 @@ func (c *Client) getDynamicConfig() (*DynamicConfig, error) {
 	return c.config, nil
 }
 
-func (c *Client) ensureClientToken() error {
+func (c *Client) ensureClientToken(ctx context.Context) error {
 	if c.clientToken != "" && time.Now().Before(c.clientTokenExp) {
 		return nil
 	}
 
 	// Try fetching from Redis cache first
 	if c.redis != nil {
-		if val, err := c.redis.Get(c.ctx, "spoxy:client_token").Result(); err == nil && val != "" {
-			if exp, err := c.redis.Get(c.ctx, "spoxy:client_token_exp").Result(); err == nil && exp != "" {
+		if val, err := c.redis.Get(ctx, "spoxy:client_token").Result(); err == nil && val != "" {
+			if exp, err := c.redis.Get(ctx, "spoxy:client_token_exp").Result(); err == nil && exp != "" {
 				expTime, err := time.Parse(time.RFC3339, exp)
 				if err == nil && time.Now().Before(expTime) {
 					c.clientToken = val
@@ -224,7 +224,7 @@ func (c *Client) ensureClientToken() error {
 		}
 	}
 
-	config, err := c.getDynamicConfig()
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		// If we can't get dynamic config, use hardcoded fallback values
 		logrus.WithError(err).Warn("Could not get dynamic config for client token, using defaults")
@@ -256,7 +256,7 @@ func (c *Client) ensureClientToken() error {
 	}
 
 	jsonBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://clienttoken.spotify.com/v1/clienttoken", bytes.NewReader(jsonBody))
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://clienttoken.spotify.com/v1/clienttoken", bytes.NewReader(jsonBody))
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
@@ -295,15 +295,16 @@ func (c *Client) ensureClientToken() error {
 
 	if c.redis != nil {
 		// Cache client token and its expiration
-		c.redis.Set(c.ctx, "spoxy:client_token", c.clientToken, 0)
-		c.redis.Set(c.ctx, "spoxy:client_token_exp", c.clientTokenExp.Format(time.RFC3339), 0)
+		c.redis.Set(ctx, "spoxy:client_token", c.clientToken, 0)
+		c.redis.Set(ctx, "spoxy:client_token_exp", c.clientTokenExp.Format(time.RFC3339), 0)
 	}
 
 	return nil
 }
 
-func (c *Client) getServerTime() (int64, error) {
-	resp, err := c.http.Get("https://open.spotify.com/api/server-time")
+func (c *Client) getServerTime(ctx context.Context) (int64, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://open.spotify.com/api/server-time", nil)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -366,8 +367,8 @@ func generateHOTP(secret string, counter int64) (string, error) {
 	return fmt.Sprintf("%06d", otp), nil
 }
 
-func (c *Client) ensureToken() error {
-	if err := c.ensureClientToken(); err != nil {
+func (c *Client) ensureToken(ctx context.Context) error {
+	if err := c.ensureClientToken(ctx); err != nil {
 		logrus.WithError(err).Warn("Failed to ensure client token, proceeding without it")
 	}
 
@@ -377,8 +378,8 @@ func (c *Client) ensureToken() error {
 
 	// Try fetching from Redis cache first
 	if c.redis != nil {
-		if val, err := c.redis.Get(c.ctx, "spoxy:access_token").Result(); err == nil && val != "" {
-			if exp, err := c.redis.Get(c.ctx, "spoxy:access_token_exp").Result(); err == nil && exp != "" {
+		if val, err := c.redis.Get(ctx, "spoxy:access_token").Result(); err == nil && val != "" {
+			if exp, err := c.redis.Get(ctx, "spoxy:access_token_exp").Result(); err == nil && exp != "" {
 				expTime, err := time.Parse(time.RFC3339, exp)
 				if err == nil && time.Now().Before(expTime) {
 					c.token = val
@@ -390,13 +391,13 @@ func (c *Client) ensureToken() error {
 		}
 	}
 
-	serverTime, err := c.getServerTime()
+	serverTime, err := c.getServerTime(ctx)
 	if err != nil {
 		logrus.WithError(err).Warn("Failed to get server time, using local time")
 		serverTime = time.Now().Unix()
 	}
 
-	config, err := c.getDynamicConfig()
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get dynamic config: %w", err)
 	}
@@ -419,7 +420,7 @@ func (c *Client) ensureToken() error {
 	}).Debug("Generated dynamic TOTP")
 
 	urlStr := fmt.Sprintf("https://open.spotify.com/api/token?reason=init&productType=web-player&totp=%s&totpServer=%d&totpVer=%d", totpValue, serverTime, config.TOTPVersion)
-	req, _ := http.NewRequest("GET", urlStr, nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 
 	// User-provided headers and cookies
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
@@ -464,8 +465,8 @@ func (c *Client) ensureToken() error {
 
 	if c.redis != nil {
 		// Cache access token and its expiration
-		c.redis.Set(c.ctx, "spoxy:access_token", c.token, 0)
-		c.redis.Set(c.ctx, "spoxy:access_token_exp", c.expiryTime.Format(time.RFC3339), 0)
+		c.redis.Set(ctx, "spoxy:access_token", c.token, 0)
+		c.redis.Set(ctx, "spoxy:access_token_exp", c.expiryTime.Format(time.RFC3339), 0)
 	}
 
 	logrus.Info("Successfully obtained new Spotify access token and cached it")
@@ -481,11 +482,11 @@ func parseLink(link string) (string, string, error) {
 	return m[1], m[2], nil
 }
 
-func (c *Client) get(urlStr string, v interface{}) error {
-	return c.getInternal(urlStr, v, true)
+func (c *Client) get(ctx context.Context, urlStr string, v interface{}) error {
+	return c.getInternal(ctx, urlStr, v, true)
 }
 
-func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) error {
+func (c *Client) getInternal(ctx context.Context, urlStr string, v interface{}, retryOn401 bool) error {
 	var lastErr error
 	maxRetries := 3
 	backoff := 1 * time.Second
@@ -502,15 +503,15 @@ func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) erro
 		}
 
 		// Wait for rate limiter
-		if err := c.limiter.Wait(c.ctx); err != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
 			return fmt.Errorf("rate limiter error: %w", err)
 		}
 
-		if err := c.ensureToken(); err != nil {
+		if err := c.ensureToken(ctx); err != nil {
 			return err
 		}
 
-		req, _ := http.NewRequest("GET", urlStr, nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 		// ... (headers)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 		req.Header.Set("Accept", "application/json")
@@ -519,7 +520,7 @@ func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) erro
 		req.Header.Set("Authorization", "Bearer "+c.token)
 		req.Header.Set("app-platform", "WebPlayer")
 		appVersion := "1.2.58.261.g16b088e2"
-		if cfg, err := c.getDynamicConfig(); err == nil && cfg.ClientVersion != "" {
+		if cfg, err := c.getDynamicConfig(ctx); err == nil && cfg.ClientVersion != "" {
 			appVersion = cfg.ClientVersion
 		}
 		req.Header.Set("spotify-app-version", appVersion)
@@ -566,7 +567,7 @@ func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) erro
 			c.token = ""
 			c.clientToken = ""
 			if c.redis != nil {
-				c.redis.Del(c.ctx, "spoxy:access_token", "spoxy:access_token_exp", "spoxy:client_token", "spoxy:client_token_exp")
+				c.redis.Del(ctx, "spoxy:access_token", "spoxy:access_token_exp", "spoxy:client_token", "spoxy:client_token_exp")
 			}
 			// One-time retry for 401, don't increment i
 			i--
@@ -611,7 +612,7 @@ func (c *Client) getInternal(urlStr string, v interface{}, retryOn401 bool) erro
 	return fmt.Errorf("request failed after %d retries: %w", maxRetries, lastErr)
 }
 
-func (c *Client) graphqlRequest(operationName, variables, sha256Hash string, v interface{}) error {
+func (c *Client) graphqlRequest(ctx context.Context, operationName, variables, sha256Hash string, v interface{}) error {
 	ext := fmt.Sprintf(`{"persistedQuery":{"version":1,"sha256Hash":"%s"}}`, sha256Hash)
 	u, _ := url.Parse("https://api-partner.spotify.com/pathfinder/v1/query")
 	q := u.Query()
@@ -620,12 +621,12 @@ func (c *Client) graphqlRequest(operationName, variables, sha256Hash string, v i
 	q.Set("extensions", ext)
 	u.RawQuery = q.Encode()
 
-	return c.get(u.String(), v)
+	return c.get(ctx, u.String(), v)
 }
 
-func (c *Client) Track(id string) (*Track, error) {
+func (c *Client) Track(ctx context.Context, id string) (*Track, error) {
 	var data TrackResponse
-	config, err := c.getDynamicConfig()
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dynamic config: %w", err)
 	}
@@ -633,7 +634,7 @@ func (c *Client) Track(id string) (*Track, error) {
 	variables := fmt.Sprintf(`{"uri":"spotify:track:%s"}`, id)
 	hash := config.GetTrackHash
 
-	if err := c.graphqlRequest("getTrack", variables, hash, &data); err != nil {
+	if err := c.graphqlRequest(ctx, "getTrack", variables, hash, &data); err != nil {
 		return nil, err
 	}
 
@@ -726,8 +727,8 @@ func (c *Client) Track(id string) (*Track, error) {
 	}, nil
 }
 
-func (c *Client) Artist(id string) ([]Track, string, error) {
-	config, err := c.getDynamicConfig()
+func (c *Client) Artist(ctx context.Context, id string) ([]Track, string, error) {
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
@@ -736,7 +737,7 @@ func (c *Client) Artist(id string) ([]Track, string, error) {
 	variables := fmt.Sprintf(`{"uri":"spotify:artist:%s","locale":"","includePrerelease":false}`, id)
 	hash := config.GetArtistHash
 
-	if err := c.graphqlRequest("queryArtistOverview", variables, hash, &data); err != nil {
+	if err := c.graphqlRequest(ctx, "queryArtistOverview", variables, hash, &data); err != nil {
 		return nil, "", err
 	}
 
@@ -751,7 +752,7 @@ func (c *Client) Artist(id string) ([]Track, string, error) {
 		if trackID == "" {
 			trackID = strings.TrimPrefix(item.Track.URI, "spotify:track:")
 		}
-		t, err := c.Track(trackID)
+		t, err := c.Track(ctx, trackID)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"artist_id": id,
@@ -766,8 +767,8 @@ func (c *Client) Artist(id string) ([]Track, string, error) {
 	return tracks, artist.Profile.Name, nil
 }
 
-func (c *Client) Album(id string) ([]Track, string, error) {
-	config, err := c.getDynamicConfig()
+func (c *Client) Album(ctx context.Context, id string) ([]Track, string, error) {
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
@@ -776,7 +777,7 @@ func (c *Client) Album(id string) ([]Track, string, error) {
 	variables := fmt.Sprintf(`{"uri":"spotify:album:%s","locale":"","offset":0,"limit":50}`, id)
 	hash := config.GetAlbumHash
 
-	if err := c.graphqlRequest("getAlbum", variables, hash, &data); err != nil {
+	if err := c.graphqlRequest(ctx, "getAlbum", variables, hash, &data); err != nil {
 		return nil, "", err
 	}
 
@@ -788,7 +789,7 @@ func (c *Client) Album(id string) ([]Track, string, error) {
 	var tracks []Track
 	for _, item := range album.TracksV2.Items {
 		trackID := strings.TrimPrefix(item.Track.URI, "spotify:track:")
-		t, err := c.Track(trackID)
+		t, err := c.Track(ctx, trackID)
 		if err != nil {
 			logrus.WithFields(logrus.Fields{
 				"album_id": id,
@@ -803,52 +804,44 @@ func (c *Client) Album(id string) ([]Track, string, error) {
 	return tracks, album.Name, nil
 }
 
-func (c *Client) Playlist(id string) ([]Track, string, error) {
-	var tracks []Track
-	var playlistName string
-	offset := 0
-	limit := 100
-
-	config, err := c.getDynamicConfig()
+func (c *Client) Playlist(ctx context.Context, id string) ([]Track, string, error) {
+	config, err := c.getDynamicConfig(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get dynamic config: %w", err)
 	}
 
-	for {
-		var data PlaylistResponse
+	limit := 100
+	// 1. Fetch first page to get metadata and total count
+	var firstData PlaylistResponse
+	variables := fmt.Sprintf(`{"uri":"spotify:playlist:%s","offset":0,"limit":%d,"enableWatchFeedEntrypoint":false}`, id, limit)
+	if err := c.graphqlRequest(ctx, "fetchPlaylist", variables, config.FetchPlaylistHash, &firstData); err != nil {
+		return nil, "", err
+	}
 
-		variables := fmt.Sprintf(`{"uri":"spotify:playlist:%s","offset":%d,"limit":%d,"enableWatchFeedEntrypoint":false}`, id, offset, limit)
-		hash := config.FetchPlaylistHash
+	if firstData.Data.PlaylistV2.Typename != "Playlist" {
+		return nil, "", fmt.Errorf("playlist not found: %s", id)
+	}
 
-		if err := c.graphqlRequest("fetchPlaylist", variables, hash, &data); err != nil {
-			return nil, "", err
-		}
-
-		if data.Data.PlaylistV2.Typename != "Playlist" {
-			return nil, "", fmt.Errorf("playlist not found: %s", id)
-		}
-
-		if playlistName == "" {
-			playlistName = data.Data.PlaylistV2.Name
-		}
-
+	playlistName := firstData.Data.PlaylistV2.Name
+	totalCount := firstData.Data.PlaylistV2.Content.TotalCount
+	
+	// Pre-allocate tracks slice if possible, or use a map of pages
+	allTracks := make([]Track, 0, totalCount)
+	
+	// Helper to extract tracks from response
+	extractTracks := func(data *PlaylistResponse) []Track {
 		items := data.Data.PlaylistV2.Content.Items
-		if len(items) == 0 {
-			break
-		}
-
+		tracks := make([]Track, 0, len(items))
 		for _, item := range items {
 			d := item.ItemV2.Data
 			if d.Typename != "Track" {
 				continue
 			}
-
 			trackID := d.ID
 			if trackID == "" && strings.HasPrefix(d.URI, "spotify:track:") {
 				trackID = strings.TrimPrefix(d.URI, "spotify:track:")
 			}
-
-			// Build artists
+			
 			artistObjs := make([]SimplifiedArtist, 0, len(d.Artists.Items))
 			for _, a := range d.Artists.Items {
 				aID := strings.TrimPrefix(a.URI, "spotify:artist:")
@@ -861,8 +854,7 @@ func (c *Client) Playlist(id string) ([]Track, string, error) {
 					URI:          a.URI,
 				})
 			}
-
-			// Build album
+			
 			album := d.AlbumOfTrack
 			albumID := strings.TrimPrefix(album.URI, "spotify:album:")
 			albumImages := make([]Image, 0, len(album.CoverArt.Sources))
@@ -881,20 +873,19 @@ func (c *Client) Playlist(id string) ([]Track, string, error) {
 					URI:          a.URI,
 				})
 			}
-			albumObj := SimplifiedAlbum{
-				AlbumType:    "album",
-				Artists:      albumArtists,
-				ExternalURLs: ExternalURLs{Spotify: "https://open.spotify.com/album/" + albumID},
-				Href:         "https://api.spotify.com/v1/albums/" + albumID,
-				ID:           albumID,
-				Images:       albumImages,
-				Name:         album.Name,
-				Type:         "album",
-				URI:          album.URI,
-			}
-
+			
 			tracks = append(tracks, Track{
-				Album:        albumObj,
+				Album: SimplifiedAlbum{
+					AlbumType:    "album",
+					Artists:      albumArtists,
+					ExternalURLs: ExternalURLs{Spotify: "https://open.spotify.com/album/" + albumID},
+					Href:         "https://api.spotify.com/v1/albums/" + albumID,
+					ID:           albumID,
+					Images:       albumImages,
+					Name:         album.Name,
+					Type:         "album",
+					URI:          album.URI,
+				},
 				Artists:      artistObjs,
 				DurationMs:   d.TrackDuration.TotalMilliseconds,
 				ExternalURLs: ExternalURLs{Spotify: "https://open.spotify.com/track/" + trackID},
@@ -905,24 +896,75 @@ func (c *Client) Playlist(id string) ([]Track, string, error) {
 				URI:          d.URI,
 			})
 		}
+		return tracks
+	}
 
-		offset += limit
-		if offset >= data.Data.PlaylistV2.Content.TotalCount || len(tracks) >= data.Data.PlaylistV2.Content.TotalCount {
-			break
+	allTracks = append(allTracks, extractTracks(&firstData)...)
+
+	if totalCount <= limit {
+		return allTracks, playlistName, nil
+	}
+
+	// 2. Fetch remaining pages in parallel
+	numPages := (totalCount + limit - 1) / limit
+	type pageResult struct {
+		index  int
+		tracks []Track
+		err    error
+	}
+	resultsChan := make(chan pageResult, numPages-1)
+	
+	for i := 1; i < numPages; i++ {
+		go func(pageIdx int) {
+			offset := pageIdx * limit
+			var data PlaylistResponse
+			variables := fmt.Sprintf(`{"uri":"spotify:playlist:%s","offset":%d,"limit":%d,"enableWatchFeedEntrypoint":false}`, id, offset, limit)
+			err := c.graphqlRequest(ctx, "fetchPlaylist", variables, config.FetchPlaylistHash, &data)
+			if err != nil {
+				resultsChan <- pageResult{err: err}
+				return
+			}
+			resultsChan <- pageResult{index: pageIdx, tracks: extractTracks(&data)}
+		}(i)
+	}
+
+	// Collect results
+	pages := make([][]Track, numPages)
+	pages[0] = allTracks
+	var lastErr error
+	for i := 1; i < numPages; i++ {
+		select {
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		case res := <-resultsChan:
+			if res.err != nil {
+				lastErr = res.err
+			} else {
+				pages[res.index] = res.tracks
+			}
 		}
 	}
 
-	return tracks, playlistName, nil
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+
+	// Flatten
+	finalTracks := make([]Track, 0, totalCount)
+	for _, p := range pages {
+		finalTracks = append(finalTracks, p...)
+	}
+
+	return finalTracks, playlistName, nil
 }
 
-func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
+func (c *Client) Resolve(ctx context.Context, link string) (*ResolutionResponse, error) {
 	kind, id, err := parseLink(link)
 	if err != nil {
 		return nil, err
 	}
 
 	cacheKey := fmt.Sprintf("spoxy:%s:%s", kind, id)
-	ctx := context.Background()
 
 	if c.redis != nil {
 		if val, err := c.redis.Get(ctx, cacheKey).Result(); err == nil {
@@ -941,7 +983,7 @@ func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
 	var name string
 	switch kind {
 	case "track":
-		t, err := c.Track(id)
+		t, err := c.Track(ctx, id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -953,7 +995,7 @@ func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
 			name = t.Name
 		}
 	case "album":
-		albumTracks, albumName, err := c.Album(id)
+		albumTracks, albumName, err := c.Album(ctx, id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -965,7 +1007,7 @@ func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
 			name = albumName
 		}
 	case "artist":
-		artistTracks, artistName, err := c.Artist(id)
+		artistTracks, artistName, err := c.Artist(ctx, id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}
@@ -977,7 +1019,7 @@ func (c *Client) Resolve(link string) (*ResolutionResponse, error) {
 			name = artistName
 		}
 	case "playlist":
-		playlistTracks, playlistName, err := c.Playlist(id)
+		playlistTracks, playlistName, err := c.Playlist(ctx, id)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				tracks = []Track{}

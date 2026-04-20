@@ -41,7 +41,7 @@ func main() {
 		}
 
 		log.WithField("link", link).Info("Resolving track metadata")
-		res, err := client.Resolve(link)
+		res, err := client.Resolve(r.Context(), link)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"link":  link,
@@ -93,6 +93,15 @@ type gzipResponseWriter struct {
 
 func (w gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
+}
+
+func (w gzipResponseWriter) Flush() {
+	if f, ok := w.Writer.(*gzip.Writer); ok {
+		f.Flush()
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func gzipMiddleware(next http.Handler) http.Handler {
